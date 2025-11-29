@@ -169,6 +169,9 @@ SerialIO *serialIO = nullptr;
     #define SERIAL1_PROTOCOL_RX Serial1
 #endif
 
+uint8_t tlmPacketBuffer[CRSF_MAX_PACKET_LEN+1];
+StubbornReceiver TelemetryReceiver;
+
 uint8_t currentTelemetryPayload[CRSF_MAX_PACKET_LEN];
 StubbornSender TelemetrySender;
 static uint8_t telemetryBurstCount;
@@ -393,6 +396,7 @@ void SetRFLinkRate(uint8_t index, bool bindMode) // Set speed of RF link
     OtaUpdateSerializers(smWideOr8ch, ModParams->PayloadLength);
     MspReceiver.setMaxPackageIndex(ELRS_MSP_MAX_PACKAGES);
     TelemetrySender.setMaxPackageIndex(OtaIsFullRes ? ELRS8_TELEMETRY_MAX_PACKAGES : ELRS4_TELEMETRY_MAX_PACKAGES);
+    TelemetryReceiver.setMaxPackageIndex(OtaIsFullRes ? ELRS8_TELEMETRY_MAX_PACKAGES : ELRS4_TELEMETRY_MAX_PACKAGES);
 
     // Wait for (11/10) 110% of time it takes to cycle through all freqs in FHSS table (in ms)
     cycleInterval = ((uint32_t)11U * FHSSgetChannelCount() * ModParams->FHSShopInterval * interval) / (10U * 1000U);
@@ -821,7 +825,8 @@ void ICACHE_RAM_ATTR HWtimerCallbackTock()
 
     Radio.isFirstRxIrq = true;
     updateDiversity();
-    tlmSent = HandleSendTelemetryResponse();
+    //tlmSent = HandleSendTelemetryResponse();
+    tlmSent = false;
 
     #if defined(DEBUG_RX_SCOREBOARD)
     static bool lastPacketWasTelemetry = false;
@@ -1102,6 +1107,68 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     return false;
 }
 
+static void ICACHE_RAM_ATTR ProcessRfPacket_TLM(OTA_Packet_s const * const otaPktPtr)
+{
+    DBGLN("TLM Type: %d %d", OtaIsFullRes, otaPktPtr->std.tlm_dl.type);
+
+    Radio.GetLastPacketStats();
+    CRSF::LinkStatistics.downlink_SNR = SNR_DESCALE(Radio.LastPacketSNRRaw);
+    CRSF::LinkStatistics.downlink_RSSI_1 = Radio.LastPacketRSSI;
+    CRSF::LinkStatistics.downlink_RSSI_2 = Radio.LastPacketRSSI2;
+
+    // Full res mode
+    if (OtaIsFullRes)
+    {
+        OTA_Packet8_s * const ota8 = (OTA_Packet8_s * const)otaPktPtr;
+        uint8_t *telemPtr;
+        uint8_t dataLen;
+        if (ota8->tlm_dl.containsLinkStats)
+        {
+            telemPtr = ota8->tlm_dl.ul_link_stats.payload;
+            dataLen = sizeof(ota8->tlm_dl.ul_link_stats.payload);
+        }
+        else
+        {
+            telemPtr = ota8->tlm_dl.payload;
+            dataLen = sizeof(ota8->tlm_dl.payload);
+        }
+        TelemetryReceiver.ReceiveData(ota8->tlm_dl.packageIndex, telemPtr, dataLen);
+    }
+    // Std res mode
+    else
+    {
+     const OTA_LinkStats_s *ls;
+      switch (otaPktPtr->std.tlm_dl.type)
+      {
+        case ELRS_TELEMETRY_TYPE_LINK:
+            // Antenna is the high bit in the RSSI_1 value
+            // RSSI received is signed, inverted polarity (positive value = -dBm)
+            // OpenTX's value is signed and will display +dBm and -dBm properly
+            ls = &otaPktPtr->std.tlm_dl.ul_link_stats.stats;
+            CRSF::LinkStatistics.uplink_RSSI_1 = -(ls->uplink_RSSI_1);
+            CRSF::LinkStatistics.uplink_RSSI_2 = -(ls->uplink_RSSI_2);
+            CRSF::LinkStatistics.uplink_Link_quality = ls->lq;
+            CRSF::LinkStatistics.uplink_SNR = SNR_DESCALE(ls->SNR);
+            CRSF::LinkStatistics.active_antenna = ls->antenna;
+
+            CRSF::LinkStatistics.uplink_RSSI_1 = -(ls->uplink_RSSI_1);
+            CRSF::LinkStatistics.uplink_RSSI_2 = -(ls->uplink_RSSI_2);
+            CRSF::LinkStatistics.uplink_Link_quality = ls->lq;
+            CRSF::LinkStatistics.uplink_SNR = SNR_DESCALE(ls->SNR);
+            CRSF::LinkStatistics.active_antenna = ls->antenna;
+
+            serialIO->queueLinkStatisticsPacket();
+            break;
+
+        case ELRS_TELEMETRY_TYPE_DATA:
+            TelemetryReceiver.ReceiveData(otaPktPtr->std.tlm_dl.packageIndex,
+              otaPktPtr->std.tlm_dl.payload,
+              sizeof(otaPktPtr->std.tlm_dl.payload));
+            break;
+      }
+    }
+}
+
 bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
 {
     if (status != SX12xxDriverCommon::SX12XX_RX_OK)
@@ -1148,6 +1215,11 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
         if (firmwareOptions.is_airport)
         {
             OtaUnpackAirportData(otaPktPtr, &apOutputBuffer);
+        }
+        else
+        {
+            DBGLN("Received TLM packet");
+            ProcessRfPacket_TLM(otaPktPtr);
         }
         break;
     default:
@@ -2082,6 +2154,8 @@ void setup()
     hardwareConfigured = options_init();
     #endif
 
+    TelemetryReceiver.SetDataToReceive(tlmPacketBuffer, sizeof(tlmPacketBuffer));
+
     if (hardwareConfigured)
     {
         // default to CRSF protocol and the compiled baud rate
@@ -2226,7 +2300,7 @@ void loop()
         GotConnection(now);
     }
 
-    checkSendLinkStatsToFc(now);
+    //checkSendLinkStatsToFc(now);
 
     if ((RXtimerState == tim_tentative) && ((now - GotConnectionMillis) > ConsiderConnGoodMillis) && (abs(LPF_OffsetDx.value()) <= 5))
     {
@@ -2246,6 +2320,12 @@ void loop()
         TelemetrySender.SetDataToTransmit(currentTelemetryPayload, nextPlayloadSize);
     }
 #endif
+
+    if (TelemetryReceiver.HasFinishedData())
+    {
+        serialIO->queueTelemetryPacket((uint8_t *)tlmPacketBuffer);
+        TelemetryReceiver.Unlock();
+    }
 
     updateTelemetryBurst();
     updateBindingMode(now);
