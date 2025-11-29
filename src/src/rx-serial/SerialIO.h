@@ -41,6 +41,9 @@ public:
      */
     virtual void queueLinkStatisticsPacket() = 0;
 
+
+    virtual void queueTelemetryPacket(uint8_t *data) {};
+
     /**
      * @brief Signals that the MSP frame should be queued for transmission.
      *

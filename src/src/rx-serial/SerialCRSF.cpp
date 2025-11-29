@@ -54,6 +54,26 @@ void SerialCRSF::queueLinkStatisticsPacket()
     _fifo.unlock();
 }
 
+void SerialCRSF::queueTelemetryPacket(uint8_t *data)
+{
+    uint8_t size = CRSF_FRAME_SIZE(data[CRSF_TELEMETRY_LENGTH_INDEX]);
+    if (size > CRSF_MAX_PACKET_LEN)
+    {
+        ERRLN("too large");
+        return;
+    }
+
+    data[0] = CRSF_ADDRESS_FLIGHT_CONTROLLER;
+    _fifo.lock();
+    if (_fifo.ensure(size + 1))
+    {
+        _fifo.push(size);
+        _fifo.pushBytes(data, size);
+    }
+    _fifo.unlock();
+
+}
+
 uint32_t SerialCRSF::sendRCFrame(bool frameAvailable, bool frameMissed, uint32_t *channelData)
 {
     if (!frameAvailable)
