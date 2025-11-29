@@ -121,6 +121,8 @@ public:
     void sendLinkStatisticsToFC();
     #endif
 
+    static void ICACHE_RAM_ATTR sendTelemetryToFC(uint8_t *data);
+
     /////////////////////////////////////////////////////////////
     static bool CRSFstate;
 

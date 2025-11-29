@@ -990,6 +990,31 @@ void CRSF::sendLinkStatisticsToFC()
 #endif // DEBUG_CRSF_NO_OUTPUT
 }
 
+void ICACHE_RAM_ATTR CRSF::sendTelemetryToFC(uint8_t *data)
+{
+#if !defined(DEBUG_CRSF_NO_OUTPUT)
+        uint8_t size = CRSF_FRAME_SIZE(data[CRSF_TELEMETRY_LENGTH_INDEX]);
+        if (size > CRSF_MAX_PACKET_LEN)
+        {
+            ERRLN("too large");
+            return;
+        }
+
+        data[0] = CRSF_ADDRESS_FLIGHT_CONTROLLER;
+#ifdef PLATFORM_ESP32
+        portENTER_CRITICAL(&FIFOmux);
+#endif
+        if (SerialOutFIFO.ensure(size + 1))
+        {
+            SerialOutFIFO.push(size); // length
+            SerialOutFIFO.pushBytes(data, size);
+        }
+#ifdef PLATFORM_ESP32
+        portEXIT_CRITICAL(&FIFOmux);
+#endif
+#endif // DEBUG_CRSF_NO_OUTPUT
+}
+
 void CRSF::sendRCFrameToFC()
 {
 #if !defined(DEBUG_CRSF_NO_OUTPUT)
